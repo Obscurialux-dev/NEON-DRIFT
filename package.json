@@ -1,0 +1,17 @@
+{
+  "name": "neon-drift",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NEON DRIFT - a polished endless runner built with zero-dependency HTML5 Canvas + ES modules.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test tests/*.test.js",
+    "test:watch": "node --test --watch tests/*.test.js",
+    "smoke": "node tests/smoke.browser.mjs",
+    "smoke:firefox": "node tests/smoke.webdriver.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  }
+}

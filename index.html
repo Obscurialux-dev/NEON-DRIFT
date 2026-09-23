@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <title>NEON DRIFT — Endless Runner</title>
+    <meta name="theme-color" content="#05070f" />
+    <meta
+      name="description"
+      content="NEON DRIFT — a procedurally generated neon endless runner. Jump, double jump and slide through an infinite city."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <canvas id="game" tabindex="0" aria-label="NEON DRIFT game area"></canvas>
+
+    <div id="ui">
+      <!-- ------------------------------------------------------- title -->
+      <section id="screen-title" class="screen">
+        <div class="frame">
+          <h1 class="logo">NEON<span>DRIFT</span></h1>
+          <p class="tagline">INFINITE &nbsp;·&nbsp; PROCEDURAL &nbsp;·&nbsp; UNFORGIVING</p>
+
+          <div class="records">
+            <div class="record">
+              <span class="label">BEST SCORE</span>
+              <strong id="title-best">0</strong>
+            </div>
+            <div class="record">
+              <span class="label">FURTHEST</span>
+              <strong id="title-metres">0 m</strong>
+            </div>
+            <div class="record">
+              <span class="label">RUNS</span>
+              <strong id="title-runs">0</strong>
+            </div>
+          </div>
+
+          <button id="btn-start" class="cta" type="button">
+            <span>PRESS <kbd>SPACE</kbd> / TAP TO RUN</span>
+          </button>
+
+          <ul class="controls">
+            <li><kbd>SPACE</kbd><kbd>↑</kbd><kbd>W</kbd><span>Jump</span></li>
+            <li><kbd>SPACE</kbd><span>x2 in mid-air — Double jump</span></li>
+            <li><kbd>↓</kbd><kbd>S</kbd><span>Slide under drones &amp; barriers</span></li>
+            <li><kbd>↓</kbd><span>Hold on a charge pad to buy a power-up with your chain</span></li>
+            <li><kbd>ESC</kbd><kbd>P</kbd><span>Pause</span> <kbd>M</kbd><span>Sound</span></li>
+          </ul>
+
+          <div class="row">
+            <button id="btn-sound" class="ghost" type="button">SOUND: ON</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------------- pause -->
+      <section id="screen-pause" class="screen hidden">
+        <div class="frame compact">
+          <h2 class="logo small">PAUSED</h2>
+          <div class="records">
+            <div class="record">
+              <span class="label">SCORE</span>
+              <strong id="pause-score">0</strong>
+            </div>
+            <div class="record">
+              <span class="label">DISTANCE</span>
+              <strong id="pause-metres">0 m</strong>
+            </div>
+          </div>
+          <button id="btn-resume" class="cta" type="button">RESUME</button>
+          <div class="row">
+            <button id="btn-pause-restart" class="ghost" type="button">RESTART</button>
+          </div>
+          <p class="hint"><kbd>ESC</kbd> to resume</p>
+        </div>
+      </section>
+
+      <!-- -------------------------------------------------- game over -->
+      <section id="screen-over" class="screen hidden">
+        <div class="frame">
+          <h2 class="logo small danger" id="over-title">SYSTEM FAILURE</h2>
+          <p class="tagline" id="over-reason">You hit something. It happens.</p>
+
+          <div id="over-record" class="record-banner hidden">NEW RECORD</div>
+
+          <div class="stats">
+            <div><span>SCORE</span><strong id="over-score">0</strong></div>
+            <div><span>DISTANCE</span><strong id="over-metres">0 m</strong></div>
+            <div><span>COINS</span><strong id="over-coins">0</strong></div>
+            <div><span>BEST CHAIN</span><strong id="over-chain">0</strong></div>
+            <div><span>NEAR MISSES</span><strong id="over-near">0</strong></div>
+            <div><span>CLEARED</span><strong id="over-cleared">0</strong></div>
+            <div><span>POWER-UPS</span><strong id="over-powerups">0</strong></div>
+            <div><span>PEAK MULTI</span><strong id="over-mult">x1</strong></div>
+            <div><span>CHAIN CASHED</span><strong id="over-cashed">0</strong></div>
+            <div><span>PADS BOUGHT</span><strong id="over-pads">0</strong></div>
+          </div>
+
+          <div class="records">
+            <div class="record">
+              <span class="label">BEST SCORE</span>
+              <strong id="over-best">0</strong>
+            </div>
+            <div class="record">
+              <span class="label">FURTHEST</span>
+              <strong id="over-best-metres">0 m</strong>
+            </div>
+            <div class="record">
+              <span class="label">TOTAL CASHED</span>
+              <strong id="over-total-cashed">0</strong>
+            </div>
+          </div>
+
+          <button id="btn-restart" class="cta" type="button">
+            <span>PRESS <kbd>SPACE</kbd> / TAP TO RUN AGAIN</span>
+          </button>
+          <p class="hint"><kbd>R</kbd> to retry instantly</p>
+        </div>
+      </section>
+    </div>
+
+    <!-- -------------------------------------------------- touch input -->
+    <div id="touch-controls" aria-hidden="true">
+      <button id="touch-slide" class="touch-btn" type="button">SLIDE</button>
+      <button id="touch-jump" class="touch-btn jump" type="button">JUMP</button>
+    </div>
+
+    <div id="rotate-hint">
+      <div>
+        <p>ROTATE YOUR DEVICE</p>
+        <span>NEON DRIFT runs in landscape</span>
+      </div>
+    </div>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
