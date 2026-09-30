@@ -1,12 +1,44 @@
 /**
  * Canvas HUD: score, distance, coins, multiplier, power-up timers, velocity
  * meter, district name and the opening control hint.
+ *
+ * Two performance rules are applied throughout:
+ *   1. text glows are cached *halo sprites* composited behind the glyphs, never
+ *      `shadowBlur` (which makes the rasteriser build and filter a layer per
+ *      call, per frame);
+ *   2. anything that does not change from frame to frame (the coin badge, the
+ *      tier ladder track, the velocity track) is painted once into a small
+ *      offscreen canvas and blitted.
  */
 import { PICKUP_KIND, POWERUPS, SCORE, SPEED } from '../config.js';
 import { clamp01 } from '../core/math.js';
 import { alpha } from './theme.js';
+import { drawSprite, gradientSprite, radialSprite, textHalo } from './glow.js';
 
 const FONT = '"Rajdhani", "Chakra Petch", system-ui, sans-serif';
+
+/**
+ * Small bounded cache of static HUD sprites. Keyed by content *and* device
+ * scale, so a change in render scale (window resize, adaptive step) rebuilds
+ * them at the new resolution instead of blurring a stale bitmap.
+ */
+const sprites = new Map();
+const SPRITE_LIMIT = 12;
+
+function spriteFor(key, w, h, scale, paint) {
+  const full = `${key}|${Math.round(scale * 100)}`;
+  const hit = sprites.get(full);
+  if (hit) return hit;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(w * scale));
+  canvas.height = Math.max(1, Math.round(h * scale));
+  const g = canvas.getContext('2d');
+  g.setTransform(scale, 0, 0, scale, 0, 0);
+  paint(g);
+  if (sprites.size >= SPRITE_LIMIT) sprites.delete(sprites.keys().next().value);
+  sprites.set(full, canvas);
+  return canvas;
+}
 
 function neonText(ctx, text, x, y, opts = {}) {
   const {
@@ -25,8 +57,12 @@ function neonText(ctx, text, x, y, opts = {}) {
   ctx.textAlign = align;
   ctx.textBaseline = 'alphabetic';
   if (tracking) ctx.letterSpacing = `${tracking}px`;
-  ctx.shadowColor = alpha(glow, 0.9);
-  ctx.shadowBlur = glowSize;
+  if (glowSize > 0) {
+    // One cached-sprite halo, placed on the string's own box.
+    const width = ctx.measureText(text).width;
+    const left = align === 'center' ? x - width * 0.5 : align === 'right' ? x - width : x;
+    textHalo(ctx, width, left, y, glow, glowSize, 0.8);
+  }
   ctx.lineWidth = 4;
   ctx.strokeStyle = 'rgba(2,6,16,0.85)';
   ctx.strokeText(text, x, y);
@@ -103,13 +139,21 @@ export function drawHud(ctx, view, state, opts = {}) {
 
   // --- coins + multiplier ------------------------------------------------
   const coinY = pad + 104;
-  ctx.fillStyle = '#ffcf5c';
-  ctx.shadowColor = alpha('#ffd166', 0.8);
-  ctx.shadowBlur = 10;
-  ctx.beginPath();
-  ctx.ellipse(pad + 11, coinY - 7, 8, 9, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.shadowBlur = 0;
+  const hudScale = view.dpr * view.scale;
+  // Static badge: gold disc + its halo, painted once.
+  ctx.drawImage(
+    spriteFor('coin', 34, 30, hudScale, (g) => {
+      drawSprite(g, radialSprite('#ffd166'), 2, -4, 26, 26, 0.75, true);
+      g.fillStyle = '#ffcf5c';
+      g.beginPath();
+      g.ellipse(15, 13, 8, 9, 0, 0, Math.PI * 2);
+      g.fill();
+    }),
+    pad - 2,
+    coinY - 20,
+    34,
+    30,
+  );
   neonText(ctx, `x ${state.coins}`, pad + 28, coinY, {
     size: 24,
     weight: 700,
@@ -147,14 +191,26 @@ export function drawHud(ctx, view, state, opts = {}) {
   // charge in: the player has to be able to read what they can afford.
   const segW = 24;
   const segGap = 4;
+  const ladderW = SCORE.chainMax * (segW + segGap);
+  // Static track: the empty bars never change, so they are painted once.
+  ctx.drawImage(
+    spriteFor('ladder', ladderW, 6, hudScale, (g) => {
+      g.fillStyle = alpha('#ffd166', 0.2);
+      for (let i = 0; i < SCORE.chainMax; i++) {
+        g.beginPath();
+        g.roundRect(i * (segW + segGap), 0, segW, 5, 2.5);
+        g.fill();
+      }
+    }),
+    pad,
+    coinY + 12,
+    ladderW,
+    6,
+  );
   for (let i = 0; i < SCORE.chainMax; i++) {
     const need = (i + 1) * SCORE.chainStep;
     const frac = clamp01(state.chain / need);
     const sx = pad + i * (segW + segGap);
-    ctx.fillStyle = alpha('#ffd166', 0.2);
-    ctx.beginPath();
-    ctx.roundRect(sx, coinY + 12, segW, 5, 2.5);
-    ctx.fill();
     if (frac > 0) {
       ctx.fillStyle = alpha('#ffd166', 0.9);
       ctx.beginPath();
@@ -272,18 +328,44 @@ function drawVelocity(ctx, view, pad, state) {
   const w = 190;
   const x = view.w - pad - w;
   const y = view.h - pad - 14;
-  ctx.fillStyle = alpha('#031024', 0.75);
-  ctx.beginPath();
-  ctx.roundRect(x, y, w, 10, 5);
-  ctx.fill();
-  const g = ctx.createLinearGradient(x, 0, x + w, 0);
-  g.addColorStop(0, '#4de2ff');
-  g.addColorStop(0.6, '#ffd166');
-  g.addColorStop(1, '#ff4d6d');
-  ctx.fillStyle = g;
+  const hudScale = view.dpr * view.scale;
+  // Static track.
+  ctx.drawImage(
+    spriteFor('velTrack', w, 10, hudScale, (g) => {
+      g.fillStyle = alpha('#031024', 0.75);
+      g.beginPath();
+      g.roundRect(0, 0, w, 10, 5);
+      g.fill();
+    }),
+    x,
+    y,
+    w,
+    10,
+  );
+  // Fill: the ramp is anchored to the full track, so clip and stretch a cached
+  // gradient sprite rather than building a gradient per frame.
+  ctx.save();
   ctx.beginPath();
   ctx.roundRect(x + 1, y + 1, Math.max(4, (w - 2) * frac), 8, 4);
-  ctx.fill();
+  ctx.clip();
+  drawSprite(
+    ctx,
+    gradientSprite(
+      [
+        [0, '#4de2ff'],
+        [0.6, '#ffd166'],
+        [1, '#ff4d6d'],
+      ],
+      { axis: 'x', thickness: 64 },
+    ),
+    x + 1,
+    y + 1,
+    w - 2,
+    8,
+    1,
+    false,
+  );
+  ctx.restore();
   neonText(ctx, 'VELOCITY', x - 12, y + 10, {
     size: 14,
     weight: 700,

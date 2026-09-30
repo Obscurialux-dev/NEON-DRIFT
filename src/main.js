@@ -13,6 +13,7 @@ import {
   VIEW_W,
 } from './config.js';
 import { clamp } from './core/math.js';
+import { createProfiler } from './core/perf.js';
 import { createInput } from './core/input.js';
 import { loadSave, recordRun } from './core/storage.js';
 import { createAutopilot, autopilotInput } from './game/autopilot.js';
@@ -26,6 +27,7 @@ import {
   drawSky,
   drawSkyline,
   drawStars,
+  invalidateBackground,
 } from './render/background.js';
 import {
   drawHazards,
@@ -42,16 +44,36 @@ import {
   drawFx,
   drawTexts,
   floatText,
+  liveCount,
   ring,
   spawn,
   updateFx,
 } from './render/particles.js';
+import { createQuality } from './render/quality.js';
 import { alpha, paletteAt } from './render/theme.js';
 import { createScreens } from './ui/screens.js';
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d', { alpha: false });
-const DEBUG = new URLSearchParams(location.search).has('debug');
+const PARAMS = new URLSearchParams(location.search);
+const DEBUG = PARAMS.has('debug');
+
+/** Stage profiler. Only samples when `?debug=1` is on (see `PROFILE`). */
+const PROFILE = DEBUG;
+const prof = createProfiler({ enabled: PROFILE });
+
+/** Quality tier, render resolution and the adaptive controller. */
+const quality = createQuality({ params: PARAMS });
+/** Current preset (re-read whenever the tier changes). */
+let q = quality.preset;
+
+/** Stage timer helpers — no-ops (one boolean branch) unless profiling is on. */
+const t0 = () => {
+  if (prof.enabled) prof.begin();
+};
+const t1 = (name) => {
+  if (prof.enabled) prof.end(name);
+};
 
 /* ------------------------------------------------------------- game state */
 
@@ -86,6 +108,8 @@ let scene = 'title';
 let frameCount = 0;
 let fpsAcc = 0;
 let fps = 60;
+/** Debug-only autopilot for the perf harness (`__neonDrift.autopilot(true)`). */
+let autoBot = null;
 
 const trail = [];
 let trailTimer = 0;
@@ -112,15 +136,21 @@ const view = {
 };
 
 function resize() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const cssW = canvas.clientWidth || window.innerWidth;
   const cssH = canvas.clientHeight || window.innerHeight;
-  canvas.width = Math.max(1, Math.round(cssW * dpr));
-  canvas.height = Math.max(1, Math.round(cssH * dpr));
-  const scale = cssW / VIEW_W;
-  view.dpr = dpr;
-  view.scale = scale;
-  view.h = cssH / scale;
+  const next = quality.resize(cssW, cssH, window.devicePixelRatio || 1);
+  if (canvas.width !== next.width || canvas.height !== next.height) {
+    canvas.width = next.width;
+    canvas.height = next.height;
+    // Baked layers are sized in device pixels, so they have to be rebuilt.
+    invalidateBackground(background);
+    vignette.key = '';
+  }
+  // `view.h` is in virtual units: only the CSS size and the virtual width matter.
+  view.scale = cssW / VIEW_W;
+  view.dpr = next.dpr;
+  view.backing = canvas.width * canvas.height;
+  view.h = cssH / view.scale;
   view.groundScreenY = clamp(view.h * 0.78, 320, Math.max(340, view.h - 90));
 }
 
@@ -409,18 +439,60 @@ function emitFromEvents(state, events) {
 const toX = (x) => x - view.camX;
 const toY = (y) => y - GROUND_Y + view.groundScreenY;
 
+/**
+ * Baked screen vignette. The original built a full-screen radial gradient every
+ * frame; baked at a third of the resolution and stretched, it is one textured
+ * blit and visually identical (it is a smooth darkening, so upscaling is free).
+ */
+const VIGNETTE_SCALE = 0.34;
+const vignette = { key: '', canvas: null };
+
+function bakeVignette(viewState, s) {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(viewState.w * s));
+  canvas.height = Math.max(1, Math.round(viewState.h * s));
+  const g2 = canvas.getContext('2d');
+  g2.setTransform(s, 0, 0, s, 0, 0);
+  const grad = g2.createRadialGradient(
+    viewState.w * 0.5,
+    viewState.h * 0.5,
+    viewState.h * 0.35,
+    viewState.w * 0.5,
+    viewState.h * 0.5,
+    viewState.h * 0.95,
+  );
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.55)');
+  g2.fillStyle = grad;
+  g2.fillRect(0, 0, viewState.w, viewState.h);
+  return canvas;
+}
+
+function drawVignette(target, viewState) {
+  const key = `${viewState.w}|${viewState.h}|${viewState.scale.toFixed(3)}`;
+  if (vignette.key !== key) {
+    vignette.canvas = bakeVignette(viewState, VIGNETTE_SCALE);
+    vignette.key = key;
+  }
+  target.drawImage(vignette.canvas, 0, 0, viewState.w, viewState.h);
+}
+
 let dustTimer = 0;
 let streakTimer = 0;
 
 function ambientFx(state, dt) {
   const p = state.player;
   if (!p.alive || scene !== 'playing') return;
+  /** Decorative-only emitters scale with the quality tier; gameplay feedback
+   * (jump/land/hit bursts) never does. */
+  const deco = q.decorativeScale;
 
   if (p.onGround && !p.sliding) {
     dustTimer -= dt;
     if (dustTimer <= 0) {
       dustTimer = 0.055;
-      for (let i = 0; i < 2; i++) {
+      const count = deco >= 1 ? 2 : deco >= 0.5 ? 1 : 0;
+      for (let i = 0; i < count; i++) {
         spawn(fx, {
           kind: 'dust',
           x: p.x - 18 + Math.random() * 10,
@@ -440,7 +512,8 @@ function ambientFx(state, dt) {
     dustTimer -= dt;
     if (dustTimer <= 0) {
       dustTimer = 0.022;
-      for (let i = 0; i < 3; i++) {
+      const count = deco >= 1 ? 3 : deco >= 0.5 ? 2 : 1;
+      for (let i = 0; i < count; i++) {
         spawn(fx, {
           kind: 'smoke',
           x: p.x - 24,
@@ -529,25 +602,53 @@ function render(alphaFraction) {
   ctx.save();
   ctx.translate(shakeX, shakeY);
 
-  drawSky(ctx, view, palette, state.time);
-  drawStars(ctx, view, palette, state.time);
-  drawSkyline(ctx, view, palette, state.time);
-  drawBillboards(ctx, view, palette, state.time);
-  drawFog(ctx, view, palette, state.time);
-  drawGround(ctx, view, palette, state, state.time);
+  t0();
+  drawSky(background, ctx, view, palette, state.time, q);
+  t1('sky');
+  t0();
+  drawStars(background, ctx, view, palette, state.time, q);
+  t1('stars');
+  t0();
+  drawSkyline(background, ctx, view, palette, state.time, q);
+  t1('skyline');
+  t0();
+  drawBillboards(background, ctx, view, palette, state.time, q);
+  t1('billboards');
+  t0();
+  drawFog(background, ctx, view, palette, state.time, q);
+  t1('fog');
+  t0();
+  drawGround(background, ctx, view, palette, state, state.time, q);
+  t1('ground');
+  t0();
   drawPitWarnings(ctx, view, state, state.time);
+  t1('pitWarn');
+  t0();
   drawPads(ctx, view, state, state.time);
+  t1('pads');
+  t0();
   drawPickups(ctx, view, state, state.time);
+  t1('pickups');
+  t0();
   drawHazards(ctx, view, state, state.time);
+  t1('hazards');
+  t0();
   drawSaws(ctx, view, state, state.time);
+  t1('saws');
 
   if (scene === 'playing') {
+    t0();
     state.player.renderY = previousY + (state.player.y - previousY) * alphaFraction;
     drawPlayer(ctx, view, state, state.player, { palette, time: state.time, trail, fade: 1 });
+    t1('player');
   }
 
+  t0();
   drawFx(ctx, fx, toX, toY);
   drawTexts(ctx, fx, toX, toY);
+  t1('fx');
+
+  t0();
 
   // --- screen effects ----------------------------------------------------
   if (state.flash > 0.02) {
@@ -570,25 +671,18 @@ function render(alphaFraction) {
     }
     ctx.globalAlpha = 1;
   }
+  t1('overlay');
 
-  const vg = ctx.createRadialGradient(
-    view.w * 0.5,
-    view.h * 0.5,
-    view.h * 0.35,
-    view.w * 0.5,
-    view.h * 0.5,
-    view.h * 0.95,
-  );
-  vg.addColorStop(0, 'rgba(0,0,0,0)');
-  vg.addColorStop(1, 'rgba(0,0,0,0.55)');
-  ctx.fillStyle = vg;
-  ctx.fillRect(0, 0, view.w, view.h);
+  t0();
+  drawVignette(ctx, view);
+  t1('vignette');
 
   ctx.restore();
 
   // --- HUD (never shaken) ------------------------------------------------
   ctx.setTransform(view.dpr * view.scale, 0, 0, view.dpr * view.scale, 0, 0);
   if (scene === 'playing' || scene === 'paused' || scene === 'over') {
+    t0();
     drawHud(ctx, view, game, {
       time: game.time,
       best: save.bestScore,
@@ -597,6 +691,7 @@ function render(alphaFraction) {
       districtFlash: scene === 'playing' ? districtFlash : 0,
       hint: scene === 'playing' ? clamp((hintTimer - 1.5) / 2.5, 0, 1) : 0,
     });
+    t1('hud');
   }
 
   if (scene === 'title') {
@@ -605,14 +700,44 @@ function render(alphaFraction) {
   }
 
   if (DEBUG) {
-    ctx.font = '600 14px monospace';
-    ctx.fillStyle = '#7ff0ff';
-    ctx.textAlign = 'left';
-    ctx.fillText(
-      `fps ${fps.toFixed(0)} · ${scene} · speed ${game.speed.toFixed(0)} · hz ${game.hazards.length} · pk ${game.pickups.length}`,
-      12,
-      view.h - 14,
-    );
+    t0();
+    drawDebugOverlay(view, prof, fps, entityCount(state), view.backing ?? 0);
+    t1('debug');
+  }
+}
+
+/** Live entity count behind the debug readout. */
+function entityCount(state) {
+  return state.hazards.length + state.pickups.length + state.gaps.length + state.pads.length;
+}
+
+/**
+ * `?debug=1` readout: frame timing, per-stage cost, workload and the render
+ * resolution actually in use. Cheap (a handful of `fillText` calls, no glow),
+ * and only compiled into the frame path when the query flag is present.
+ */
+function drawDebugOverlay(viewState, profiler, fpsValue, entities, backingPixels) {
+  const p = profiler;
+  const m = p.metrics;
+  const lines = [
+    `fps ${fpsValue.toFixed(0)}  frame ${p.frameEma.toFixed(1)}ms (peak ${p.framePeak.toFixed(0)})  sim ${m.simMs.toFixed(2)}ms x${m.steps}`,
+    `particles ${m.particles}/${m.particlesCap}  entities ${entities}  ${scene}`,
+    `render ${canvas.width}x${canvas.height}px  dpr ${viewState.dpr.toFixed(2)}  scale ${viewState.scale.toFixed(2)}  q ${m.quality}`,
+    `speed ${game.speed.toFixed(0)}  sky ${p.ms('sky').toFixed(1)} · city ${p.ms('skyline').toFixed(1)} · floor ${p.ms('ground').toFixed(1)} · fx ${p.ms('fx').toFixed(1)} · hud ${p.ms('hud').toFixed(1)} · sim ${p.ms('sim').toFixed(2)}`,
+  ];
+  ctx.font = '600 14px monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  const baseY = viewState.h - 14 - (lines.length - 1) * 17;
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillStyle = i === 0 ? '#7ff0ff' : '#4fbfd8';
+    ctx.fillText(lines[i], 12, baseY + i * 17);
+  }
+  // Backing-store size is shown above; the raw pixel count is handy when
+  // comparing render scales run-to-run.
+  if (backingPixels) {
+    ctx.fillStyle = '#2f7f95';
+    ctx.fillText(`${(backingPixels / 1e6).toFixed(2)} Mpx`, 12, baseY - 17);
   }
 }
 
@@ -634,19 +759,34 @@ function frame(nowMs) {
     frameCount = 0;
     fpsAcc = 0;
   }
+  prof.tick(dt * 1000);
+  // Adaptive render scale: if the smoothed frame time says we are missing the
+  // budget, shed resolution (and grow it back when there is headroom).
+  if (quality.observe(prof.frameEma)) resize();
 
   input.update(dt);
   const snapshot = { jump: input.state.jump, down: input.state.down };
+  if (autoBot && scene === 'playing') {
+    const botInput = autopilotInput(autoBot, game, dt);
+    snapshot.jump = botInput.jump;
+    snapshot.down = botInput.down;
+  }
 
   accumulator += dt;
   let steps = 0;
   const maxSteps = CONFIG.maxStepsPerFrame;
+  if (prof.enabled) prof.begin();
   while (accumulator >= stepSeconds && steps < maxSteps) {
     stepActiveState(stepSeconds, snapshot);
     accumulator -= stepSeconds;
     steps++;
   }
   if (steps >= maxSteps) accumulator = 0;
+  if (prof.enabled) {
+    prof.end('sim');
+    prof.metrics.steps = steps;
+    prof.metrics.simMs = prof.ms('sim');
+  }
 
   updateFx(fx, dt);
   ambientFx(scene === 'title' ? demo : game, dt);
@@ -669,6 +809,13 @@ function frame(nowMs) {
   const intensity = clamp((game.speed - SPEED.start) / (SPEED.max * 1.35 - SPEED.start), 0, 1);
   audio.update(scene === 'playing' ? intensity : 0.12);
 
+  if (prof.enabled) {
+    prof.metrics.particles = liveCount(fx);
+    prof.metrics.particlesCap = fx.capacity;
+    prof.metrics.entities = entityCount(scene === 'title' ? demo : game);
+    prof.metrics.quality = quality.describe();
+  }
+
   render(clamp(accumulator / stepSeconds, 0, 1));
   requestAnimationFrame(frame);
 }
@@ -677,6 +824,7 @@ function frame(nowMs) {
 
 function boot() {
   resize();
+  fx.capacity = q.particleCap;
   audio.setMuted(save.muted);
   screens.setSound(save.muted);
   screens.setTitleStats(save);
@@ -700,6 +848,21 @@ globalThis.__neonDrift = {
   get fps() {
     return fps;
   },
+  get perf() {
+    return prof;
+  },
+  /** Live render-quality state (tier, adaptive bias, backing store). */
+  get quality() {
+    return quality.snapshot();
+  },
+  /** Debug-only: switch tier at runtime (`__neonDrift.setQuality('low')`). */
+  setQuality(name) {
+    if (!quality.setPreset(name)) return false;
+    q = quality.preset;
+    fx.capacity = q.particleCap;
+    resize();
+    return true;
+  },
   get view() {
     return view;
   },
@@ -718,6 +881,14 @@ globalThis.__neonDrift = {
   setInput(jump, down) {
     input.state.touchJump = !!jump;
     input.state.touchDown = !!down;
+  },
+  /**
+   * Debug-only: hand the live run over to the attract-mode autopilot. Used by
+   * `npm run perf` to profile a long, realistic run instead of the ~5 s an
+   * untouched runner survives. Does not touch gameplay code or controls.
+   */
+  autopilot(on) {
+    autoBot = on ? (autoBot ?? createAutopilot()) : null;
   },
 };
 

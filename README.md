@@ -48,12 +48,50 @@ index.html            DOM shell: canvas + title/pause/game-over overlays
 server.mjs            zero-dependency static file server
 src/main.js           bootstrap, fixed-timestep loop, scenes, event -> fx/audio bridge
 src/config.js         every tunable: speed ramp, player physics, spawn rules, palettes
-src/core/             math + seeded rng, input (keyboard/pointer/touch), localStorage save
+src/core/             math + seeded rng, input (keyboard/pointer/touch), localStorage save, frame profiler
 src/game/             player, procedural spawner, collision, autopilot, world state
-src/render/           background, entities, particles, HUD, theme (all canvas-drawn)
+src/render/           background, entities, particles, HUD, theme, cached glow sprites, quality presets
 src/audio/            Web Audio synthesiser: SFX + procedural music whose intensity tracks speed
 src/ui/               overlay screens controller and touch pad
 ```
+
+## Performance
+
+The frame loop renders a fixed 1280x720 *virtual* view into a backing store whose device
+resolution is chosen at boot and can shrink or grow while you play:
+
+- **Quality presets** (`high` / `medium` / `low`) pick a hard DPR cap and a ceiling on
+  `canvas.width * canvas.height`, so a 3x-DPR phone never rasterises megapixels of glow it
+  cannot display.
+- **The adaptive controller** watches the smoothed frame time in 60-frame windows and steps
+  the render scale down (by up to 0.88x, floored at 0.55x) when frames overrun, and back up
+  when there is headroom. A hysteresis band around 60 fps stops it flapping.
+- **Static work is baked once** — sky, starfield, vignette, skyline strips and every glow
+  halo live in cached offscreen canvases or sprites (`src/render/glow.js`), so a frame is
+  mostly blits. `backdrop-filter` is deliberately absent from the overlay CSS: it makes the
+  compositor re-blur the canvas behind every always-present `.screen` layer.
+
+URL overrides, handy when you want to measure or A/B a device by hand:
+
+```
+?debug=1            on-canvas frame time, per-stage cost, render resolution and workload
+?quality=low        force a preset (high | medium | low)
+?scale=0.75         pin the resolution multiplier (also disables the adaptive loop)
+?adaptive=0         keep the preset's resolution, but stop the adaptive controller
+```
+
+### Measuring
+
+```bash
+npm run perf                              # desktop, hi-DPI, mobile x2, long session
+npm run perf -- --label before            # writes /tmp/neon-drift-perf-before.json
+npm run perf -- --extra adaptive=0        # extra query args on every measured page
+PERF_SECONDS=20 npm run perf              # longer sampling windows
+```
+
+`tests/perf.browser.mjs` boots the real server and Chromium, drives every scenario with the
+autopilot debug hook (`__neonDrift.autopilot(true)` — older builds are restarted on death
+instead), and prints mean frame time with p95/p99 plus the profiler's stage breakdown.
 
 ## Tests
 
@@ -61,6 +99,7 @@ src/ui/               overlay screens controller and touch pad
 npm test             # headless Node suite (no dependencies)
 npm run smoke        # real Chromium via Playwright
 npm run smoke:firefox # real Firefox via geckodriver (no browser download needed)
+npm run perf         # frame-time benchmark across desktop + mobile (see Performance above)
 ```
 
 The Node suite covers the deterministic core (rng, math, player physics, world state,

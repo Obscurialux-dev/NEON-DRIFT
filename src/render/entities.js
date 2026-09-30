@@ -8,6 +8,7 @@
 import { PAD, PICKUP_KIND } from '../config.js';
 import { clamp, clamp01, TAU } from '../core/math.js';
 import { alpha } from './theme.js';
+import { beamSprite, drawGlow, drawSprite, radialSprite, shaftSprite, textHalo } from './glow.js';
 
 const BODY = '#e7fbff';
 const SCARF = '#ffb03a';
@@ -61,15 +62,10 @@ export function drawPlayer(ctx, view, state, player, opts = {}) {
   if (overdrive || shield || magnet) {
     const color = overdrive ? '#ff5d8f' : shield ? '#66e0ff' : '#c084fc';
     const radius = player.sliding ? 54 : 74;
-    const g = ctx.createRadialGradient(screenX, screenY - 30, 4, screenX, screenY - 30, radius);
-    g.addColorStop(0, alpha(color, 0.4));
-    g.addColorStop(0.6, alpha(color, 0.12));
-    g.addColorStop(1, alpha(color, 0));
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.arc(screenX, screenY - 30, radius, 0, TAU);
-    ctx.fill();
+    drawGlow(ctx, screenX, screenY - 30, radius, color, 0.5 * bodyAlpha);
   }
+  // Body halo: one cached sprite instead of a `shadowBlur` on every limb.
+  drawGlow(ctx, screenX, screenY - 34, 48, overdrive ? '#ff5d8f' : palette.accent, 0.6 * bodyAlpha);
 
   ctx.translate(screenX, screenY);
   // Squash & stretch, double-jump spin, and the lying-down slide pose.
@@ -88,8 +84,6 @@ export function drawPlayer(ctx, view, state, player, opts = {}) {
 
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  ctx.shadowColor = overdrive ? '#ff5d8f' : palette.accent;
-  ctx.shadowBlur = 14;
 
   const legSwing = airborne ? 0.55 : Math.sin(phase) * 0.85;
   const legLift = airborne ? 0.7 : Math.max(0, Math.cos(phase)) * 0.55;
@@ -165,7 +159,6 @@ export function drawPlayer(ctx, view, state, player, opts = {}) {
   }
   ctx.stroke();
 
-  ctx.shadowBlur = 0;
   ctx.restore();
 
   // --- power-up overlays (screen space, un-rotated) ----------------------
@@ -228,11 +221,10 @@ export function drawHazards(ctx, view, state, time) {
 
     if (h.kind === 'spike') {
       const w = x1 - x0;
+      drawGlow(ctx, (x0 + x1) * 0.5, (y0 + y1) * 0.5, w * 0.85, HAZARD_HOT, (hot ? 0.85 : 0.3) * pulse, true);
       ctx.fillStyle = '#1a0a14';
       ctx.strokeStyle = alpha(rim, 0.85 * pulse);
       ctx.lineWidth = 2.5;
-      ctx.shadowColor = alpha(HAZARD_HOT, hot ? 0.9 : 0.4);
-      ctx.shadowBlur = hot ? 20 : 8;
       ctx.beginPath();
       ctx.moveTo(x0, y1);
       ctx.lineTo(x0 + w * 0.5, y0);
@@ -240,18 +232,15 @@ export function drawHazards(ctx, view, state, time) {
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
-      ctx.shadowBlur = 0;
       ctx.fillStyle = alpha('#ffd166', 0.5 * pulse);
       ctx.fillRect(x0, y1 - 5, w, 5);
     } else if (h.kind === 'crate') {
+      drawGlow(ctx, (x0 + x1) * 0.5, (y0 + y1) * 0.5, (x1 - x0) * 0.8, HAZARD_HOT, (hot ? 0.7 : 0.22) * pulse, true);
       ctx.fillStyle = '#12182b';
       ctx.strokeStyle = alpha(rim, 0.8 * pulse);
       ctx.lineWidth = 3;
-      ctx.shadowColor = alpha(HAZARD_HOT, hot ? 0.8 : 0.3);
-      ctx.shadowBlur = hot ? 16 : 6;
       ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
       ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
-      ctx.shadowBlur = 0;
       ctx.strokeStyle = alpha(rim, 0.45);
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -278,16 +267,12 @@ export function drawHazards(ctx, view, state, time) {
     } else if (h.kind === 'overhang') {
       const top = view.toY(h.y);
       const bottom = view.toY(h.y + h.h);
-      const g = ctx.createLinearGradient(0, top, 0, bottom);
-      g.addColorStop(0, '#0a0f1e');
-      g.addColorStop(1, '#160b1a');
-      ctx.fillStyle = g;
+      ctx.fillStyle = '#120c1c';
       ctx.fillRect(x0, top - 80, x1 - x0, bottom - top + 80);
-      ctx.shadowColor = alpha(HAZARD_HOT, hot ? 0.9 : 0.35);
-      ctx.shadowBlur = hot ? 22 : 8;
+      // Glow under the barrier edge: sprite, not a blurred 4 px rect.
+      drawSprite(ctx, radialSprite(HAZARD_HOT), x0 - 10, bottom - 34, x1 - x0 + 20, 44, (hot ? 0.8 : 0.28) * pulse, true);
       ctx.fillStyle = alpha(rim, 0.9 * pulse);
       ctx.fillRect(x0, bottom - 4, x1 - x0, 4);
-      ctx.shadowBlur = 0;
       ctx.fillStyle = alpha('#ffd166', 0.3 * pulse);
       for (let sx = x0; sx < x1 - 12; sx += 26) {
         ctx.beginPath();
@@ -301,27 +286,35 @@ export function drawHazards(ctx, view, state, time) {
       const cx = (x0 + x1) * 0.5;
       const cy = (y0 + y1) * 0.5;
       const w = x1 - x0;
-      const beam = ctx.createLinearGradient(cx, cy, cx, view.groundScreenY);
-      beam.addColorStop(0, alpha(HAZARD_HOT, 0.26 * (0.6 + 0.4 * pulse)));
-      beam.addColorStop(1, alpha(HAZARD_HOT, 0));
-      ctx.fillStyle = beam;
+      // Light shaft: the cone is clipped and filled with a cached gradient
+      // sprite instead of a per-frame linear gradient over the whole cone.
+      ctx.save();
       ctx.beginPath();
       ctx.moveTo(cx - w * 0.3, y1);
       ctx.lineTo(cx + w * 0.3, y1);
       ctx.lineTo(cx + w * 0.75, view.groundScreenY);
       ctx.lineTo(cx - w * 0.75, view.groundScreenY);
       ctx.closePath();
-      ctx.fill();
+      ctx.clip();
+      drawSprite(
+        ctx,
+        shaftSprite(HAZARD_HOT),
+        cx - w * 0.75,
+        y1,
+        w * 1.5,
+        Math.max(1, view.groundScreenY - y1),
+        0.26 * (0.6 + 0.4 * pulse),
+        true,
+      );
+      ctx.restore();
 
+      drawGlow(ctx, cx, cy, w * 0.9, HAZARD_HOT, (hot ? 0.8 : 0.3) * pulse, true);
       ctx.fillStyle = '#12172b';
       ctx.strokeStyle = alpha(rim, 0.85 * pulse);
       ctx.lineWidth = 3;
-      ctx.shadowColor = alpha(HAZARD_HOT, hot ? 0.9 : 0.4);
-      ctx.shadowBlur = hot ? 20 : 8;
       roundRect(ctx, x0, y0, w, y1 - y0, 12);
       ctx.fill();
       ctx.stroke();
-      ctx.shadowBlur = 0;
 
       ctx.strokeStyle = alpha('#9fe6ff', 0.45);
       ctx.lineWidth = 2;
@@ -350,8 +343,7 @@ export function drawSaws(ctx, view, state, time) {
 
     ctx.save();
     ctx.translate(cx, cy);
-    ctx.shadowColor = alpha(HAZARD_HOT, u > 0.7 ? 0.95 : 0.45);
-    ctx.shadowBlur = u > 0.7 ? 22 : 10;
+    drawGlow(ctx, 0, 0, r * 1.7, HAZARD_HOT, u > 0.7 ? 0.85 : 0.4, true);
     ctx.rotate(time * 15);
     ctx.fillStyle = alpha(HAZARD_HOT, 0.9 * pulse);
     for (let i = 0; i < 10; i++) {
@@ -363,7 +355,6 @@ export function drawSaws(ctx, view, state, time) {
       ctx.closePath();
       ctx.fill();
     }
-    ctx.shadowBlur = 0;
     ctx.rotate(-time * 21);
     ctx.fillStyle = '#1a0a14';
     ctx.beginPath();
@@ -407,22 +398,22 @@ export function drawPickups(ctx, view, state, time) {
     if (p.kind === PICKUP_KIND.COIN) {
       const spin = Math.abs(Math.cos(time * 4.4 + p.phase));
       const near = magnetOn || Math.hypot(p.x - px, p.y - py) < 190;
-      ctx.shadowColor = alpha('#ffd166', near ? 0.95 : 0.5);
-      ctx.shadowBlur = near ? 18 : 9;
+      drawGlow(ctx, x, y, p.r * 1.9, '#ffd166', near ? 0.85 : 0.45, true);
       ctx.fillStyle = '#ffcf5c';
       ctx.beginPath();
       ctx.ellipse(x, y, p.r * (0.35 + spin * 0.65), p.r, 0, 0, TAU);
       ctx.fill();
-      ctx.shadowBlur = 0;
       ctx.fillStyle = alpha('#fff6d6', 0.9);
       ctx.beginPath();
       ctx.ellipse(x, y, p.r * (0.1 + spin * 0.24), p.r * 0.46, 0, 0, TAU);
       ctx.fill();
     } else if (p.kind === PICKUP_KIND.GEM) {
-      const hue = (time * 90 + p.phase * 40) % 360;
-      ctx.shadowColor = `hsla(${hue}, 100%, 70%, 0.9)`;
-      ctx.shadowBlur = 20;
-      ctx.fillStyle = `hsl(${hue}, 90%, 65%)`;
+      // Hue is quantised into 15° steps so the sprite cache stays tiny and
+      // reusable — the cycle is 90°/s, so the eye cannot see the stepping.
+      const hue = Math.round((time * 90 + p.phase * 40) % 360 / 15) * 15;
+      const hueColor = `hsl(${hue}, 90%, 65%)`;
+      drawGlow(ctx, x, y, p.r * 2.2, `hsl(${hue}, 100%, 70%)`, 0.85, true);
+      ctx.fillStyle = hueColor;
       ctx.beginPath();
       ctx.moveTo(x, y - p.r);
       ctx.lineTo(x + p.r * 0.85, y);
@@ -430,7 +421,6 @@ export function drawPickups(ctx, view, state, time) {
       ctx.lineTo(x - p.r * 0.85, y);
       ctx.closePath();
       ctx.fill();
-      ctx.shadowBlur = 0;
       ctx.fillStyle = alpha('#ffffff', 0.8);
       ctx.beginPath();
       ctx.moveTo(x, y - p.r);
@@ -462,15 +452,10 @@ function drawPowerupOrb(ctx, x, y, p, time) {
   const color = ORB_COLORS[p.kind] ?? '#ffffff';
   const pulse = 0.75 + 0.25 * Math.sin(time * 5 + p.phase);
 
-  // Light shaft, so orbs read from far away.
-  const beam = ctx.createLinearGradient(x, y - 240, x, y + 20);
-  beam.addColorStop(0, alpha(color, 0));
-  beam.addColorStop(1, alpha(color, 0.16 * pulse));
-  ctx.fillStyle = beam;
-  ctx.fillRect(x - 16, y - 240, 32, 260);
+  // Light shaft, so orbs read from far away (cached sprite, stretched).
+  drawSprite(ctx, beamSprite(color, 0.16), x - 16, y - 240, 32, 260, pulse, true);
 
-  ctx.shadowColor = alpha(color, 0.95);
-  ctx.shadowBlur = 24;
+  drawGlow(ctx, x, y, 34 * pulse + 6, color, 0.85, true);
   ctx.fillStyle = alpha('#04070f', 0.92);
   ctx.beginPath();
   ctx.arc(x, y, 22 * pulse + 2, 0, TAU);
@@ -478,7 +463,6 @@ function drawPowerupOrb(ctx, x, y, p, time) {
   ctx.strokeStyle = color;
   ctx.lineWidth = 3;
   ctx.stroke();
-  ctx.shadowBlur = 0;
 
   ctx.strokeStyle = alpha(color, 0.6);
   ctx.lineWidth = 2;
@@ -549,14 +533,13 @@ function padLabel(ctx, text, x, y, color, a) {
   ctx.font = `700 17px ${PAD_FONT}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.shadowColor = alpha(color, 0.9 * a);
-  ctx.shadowBlur = 10;
+  // Halo sprite behind the string instead of a blurred text draw.
+  textHalo(ctx, ctx.measureText(text).width, x, y, color, 10, 0.75 * a);
   ctx.lineWidth = 4;
   ctx.strokeStyle = 'rgba(2,6,16,0.85)';
   ctx.strokeText(text, x, y);
   ctx.fillStyle = alpha(color, a);
   ctx.fillText(text, x, y);
-  ctx.shadowBlur = 0;
 }
 
 /** A small diamond, used as the "chain" currency glyph next to a price. */
@@ -601,11 +584,16 @@ export function drawPads(ctx, view, state, time) {
 
     // --- light shaft: makes the pad readable from far away ---
     if (!pad.used) {
-      const beam = ctx.createLinearGradient(x0, gy - 150, x0, gy);
-      beam.addColorStop(0, alpha(color, 0));
-      beam.addColorStop(1, alpha(color, (affordable ? 0.16 : 0.07) * (near ? 1.6 : 1)));
-      ctx.fillStyle = beam;
-      ctx.fillRect(x0 - 6, gy - 150, w + 12, 150);
+      drawSprite(
+        ctx,
+        beamSprite(color, affordable ? 0.16 : 0.07),
+        x0 - 6,
+        gy - 150,
+        w + 12,
+        150,
+        near ? 1.6 : 1,
+        true,
+      );
     }
 
     // --- the strip ---
@@ -636,14 +624,12 @@ export function drawPads(ctx, view, state, time) {
     }
 
     // --- rim ---
+    drawGlow(ctx, x0 + w * 0.5, gy, w * 0.62, color, (near && !pad.used ? 0.55 : 0.28) * lit, true);
     ctx.strokeStyle = alpha(color, lit);
     ctx.lineWidth = 2;
-    ctx.shadowColor = alpha(color, lit);
-    ctx.shadowBlur = near && !pad.used ? 16 : 7;
     ctx.beginPath();
     ctx.roundRect(x0, gy - PAD.band * 0.5, w, PAD.band, 7);
     ctx.stroke();
-    ctx.shadowBlur = 0;
 
     // --- label: what you get, and what it costs ---
     const mid = x0 + w * 0.5;

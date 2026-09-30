@@ -9,7 +9,8 @@
     "test": "node --test tests/*.test.js",
     "test:watch": "node --test --watch tests/*.test.js",
     "smoke": "node tests/smoke.browser.mjs",
-    "smoke:firefox": "node tests/smoke.webdriver.mjs"
+    "smoke:firefox": "node tests/smoke.webdriver.mjs",
+    "perf": "node tests/perf.browser.mjs"
   },
   "devDependencies": {
     "playwright": "^1.63.0"

@@ -4,6 +4,7 @@
  * generator needs to be deterministic).
  */
 import { alpha } from './theme.js';
+import { radialSprite } from './glow.js';
 
 const TAU = Math.PI * 2;
 
@@ -26,23 +27,63 @@ function makeParticle() {
     drag: 0,
     additive: true,
     fade: 1,
+    /** Index inside `fx.active`, or -1 while dead. */
+    slot: -1,
   };
 }
 
+/**
+ * @param {number} max Pool size. This is a ceiling, not a target: the *budget*
+ *   (`capacity`) is what the quality preset actually allows to be live, and can
+ *   be lowered at runtime without reallocating.
+ */
 export function createFx(max = 900) {
   const pool = new Array(max);
   for (let i = 0; i < max; i++) pool[i] = makeParticle();
-  return { pool, cursor: 0, texts: [], trauma: 0 };
+  return {
+    pool,
+    cursor: 0,
+    texts: [],
+    trauma: 0,
+    /** Live-particle budget (quality preset). */
+    capacity: max,
+    /**
+     * Compact list of the live particles, so update/draw cost is proportional
+     * to what is actually on screen instead of to the 900-slot pool.
+     */
+    active: [],
+  };
 }
+
+/** How many pool slots a single spawn may examine before giving up. */
+const SPAWN_SCAN = 24;
 
 export function spawn(fx, props) {
   const pool = fx.pool;
-  const p = pool[fx.cursor];
-  fx.cursor = (fx.cursor + 1) % pool.length;
+  const active = fx.active;
+  const budgetLeft = active.length < fx.capacity;
+  let p = null;
+  // Walk from the ring cursor looking for a slot we are allowed to take. Under
+  // budget that is a free slot; at budget it has to be a live one (recycling the
+  // oldest particle rather than growing the live set).
+  for (let i = 0; i < SPAWN_SCAN; i++) {
+    const candidate = pool[(fx.cursor + i) % pool.length];
+    const usable = budgetLeft ? !candidate.alive : candidate.alive;
+    if (usable) {
+      p = candidate;
+      fx.cursor = (fx.cursor + i + 1) % pool.length;
+      break;
+    }
+  }
+  if (!p) return null;
   Object.assign(p, props);
   p.alive = true;
   p.life = props.maxLife ?? props.life ?? 0.5;
   p.maxLife = p.life;
+  if (p.slot < 0) {
+    p.slot = active.length;
+    active.push(p);
+  }
   return p;
 }
 
@@ -107,14 +148,26 @@ export function floatText(fx, text, x, y, opts = {}) {
 }
 
 
+/** Number of live particles — used by the debug overlay and perf harness. */
+export function liveCount(fx) {
+  return fx.active.length;
+}
+
 export function updateFx(fx, dt) {
-  const pool = fx.pool;
-  for (let i = 0; i < pool.length; i++) {
-    const p = pool[i];
-    if (!p.alive) continue;
+  const active = fx.active;
+  for (let i = 0; i < active.length; i++) {
+    const p = active[i];
     p.life -= dt;
-    if (p.life <= 0) {
+    if (p.life <= 0 || !p.alive) {
       p.alive = false;
+      p.slot = -1;
+      // Swap-remove: keeps the list compact so the loop never visits dead slots.
+      const last = active.pop();
+      if (last !== p) {
+        last.slot = i;
+        active[i] = last;
+        i--;
+      }
       continue;
     }
     p.vy += p.gravity * dt;
@@ -141,14 +194,15 @@ export function updateFx(fx, dt) {
 
 /**
  * Draw every live particle. `toX`/`toY` convert world space to screen space, so
- * effects follow the camera exactly.
+ * effects follow the camera exactly. Only the compact `active` list is walked.
  */
 export function drawFx(ctx, fx, toX, toY) {
+  const active = fx.active;
+  if (!active.length) return;
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  for (let i = 0; i < fx.pool.length; i++) {
-    const p = fx.pool[i];
-    if (!p.alive) continue;
+  for (let i = 0; i < active.length; i++) {
+    const p = active[i];
     const t = p.life / p.maxLife;
     const a = Math.min(1, t * p.fade) * (p.kind === 'smoke' ? 0.32 : 1);
     const x = toX(p.x);
@@ -174,12 +228,20 @@ export function drawFx(ctx, fx, toX, toY) {
         break;
       }
       case 'shard': {
-        ctx.save();
-        ctx.translate(x, y);
-        ctx.rotate(p.rot);
+        // Rotated quad drawn as an explicit path: no per-particle transform
+        // (and no save/restore) in the hot loop.
+        const dx = Math.cos(p.rot) * p.size;
+        const dy = Math.sin(p.rot) * p.size;
+        const ex = -dy * 0.4;
+        const ey = dx * 0.4;
         ctx.fillStyle = p.color;
-        ctx.fillRect(-p.size, -p.size * 0.4, p.size * 2, p.size * 0.8);
-        ctx.restore();
+        ctx.beginPath();
+        ctx.moveTo(x - dx - ex, y - dy - ey);
+        ctx.lineTo(x + dx - ex, y + dy - ey);
+        ctx.lineTo(x + dx + ex, y + dy + ey);
+        ctx.lineTo(x - dx + ex, y - dy + ey);
+        ctx.closePath();
+        ctx.fill();
         break;
       }
       case 'star': {
@@ -195,14 +257,9 @@ export function drawFx(ctx, fx, toX, toY) {
         break;
       }
       case 'glow': {
-        const g = ctx.createRadialGradient(x, y, 0, x, y, Math.max(2, p.size));
-        g.addColorStop(0, alpha(p.color, 0.9));
-        g.addColorStop(0.5, alpha(p.color, 0.3));
-        g.addColorStop(1, alpha(p.color, 0));
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.arc(x, y, Math.max(2, p.size), 0, TAU);
-        ctx.fill();
+        // A cached sprite instead of a radial gradient per particle per frame.
+        const r = Math.max(2, p.size);
+        ctx.drawImage(radialSprite(p.color), x - r, y - r, r * 2, r * 2);
         break;
       }
       case 'smoke': {

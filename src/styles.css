@@ -61,18 +61,25 @@ body {
   place-items: center;
   pointer-events: auto;
   opacity: 1;
-  transition: opacity 240ms ease;
+  /* A backdrop blur over the whole viewport has to re-read and blur the canvas
+     every frame, even while the overlay is invisible: on a mid-range laptop that
+     alone cost ~45% of the frame budget. The dark radial gradient below already
+     separates the panel from the game, so the blur is replaced by a slightly
+     deeper gradient. `visibility` also lets the compositor skip painting the
+     overlay entirely while it is hidden. */
+  transition: opacity 240ms ease, visibility 0s linear 0s;
   background: radial-gradient(
     ellipse at center,
-    rgba(3, 5, 13, 0.72) 0%,
-    rgba(3, 5, 13, 0.94) 70%
+    rgba(3, 5, 13, 0.78) 0%,
+    rgba(3, 5, 13, 0.96) 70%
   );
-  backdrop-filter: blur(2px);
 }
 
 .screen.hidden {
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
+  transition: opacity 240ms ease, visibility 0s linear 240ms;
 }
 
 .frame {
@@ -379,13 +386,16 @@ kbd {
   height: clamp(64px, 13vh, 96px);
   border: 1px solid rgba(77, 226, 255, 0.35);
   border-radius: 16px;
-  background: rgba(6, 12, 26, 0.5);
+  background: rgba(6, 12, 26, 0.62);
   color: rgba(234, 252, 255, 0.85);
   font-family: inherit;
   font-size: 15px;
   font-weight: 700;
   letter-spacing: 0.2em;
-  backdrop-filter: blur(3px);
+  /* No backdrop-filter: on mobile it makes the compositor blur the frame under
+     the buttons every time they are on screen. A slightly denser translucent
+     fill reads the same against the neon background. */
+  box-shadow: inset 0 0 18px rgba(43, 139, 255, 0.12);
   user-select: none;
   -webkit-user-select: none;
 }
